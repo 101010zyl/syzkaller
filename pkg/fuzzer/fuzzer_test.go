@@ -46,6 +46,7 @@ func TestFuzz(t *testing.T) {
 	defer cancel()
 
 	corpusUpdates := make(chan corpus.NewItemEvent)
+	fmt.Print("corpusUpdates make: ")
 	fuzzer := NewFuzzer(ctx, &Config{
 		Debug:  true,
 		Corpus: corpus.NewMonitoredCorpus(ctx, corpusUpdates),

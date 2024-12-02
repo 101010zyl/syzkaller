@@ -48,8 +48,11 @@ func main() {
 		repros = loadProgs(target, *flagRepro)
 	}
 	if *flagCorpus != "" {
+		// print loadCorpus
+		log.Printf("loading corpus from %v", *flagCorpus)
 		corpus = loadCorpus(target, *flagCorpus)
 	} else if *flagCorpusProgs != "" {
+		log.Printf("loading progs from %v", *flagCorpusProgs)
 		corpus = loadProgs(target, *flagCorpusProgs)
 	}
 	log.Printf("loaded %v reproducers, %v corpus programs", len(repros), len(corpus))

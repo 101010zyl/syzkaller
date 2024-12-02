@@ -27,6 +27,8 @@ func (p *Prog) String() string {
 }
 
 func (p *Prog) Serialize() []byte {
+	fmt.Println("Print: Serialize")
+	fmt.Printf("%s\n", p.serialize(false))
 	return p.serialize(false)
 }
 

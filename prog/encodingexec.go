@@ -66,6 +66,8 @@ const (
 // Returns number of bytes written to the buffer.
 // If the provided buffer is too small for the program an error is returned.
 func (p *Prog) SerializeForExec() ([]byte, error) {
+	fmt.Print("Print: SerializeForExec\n")
+	fmt.Printf("%s\n", p.Serialize())
 	p.debugValidate()
 	w := &execContext{
 		target: p.Target,

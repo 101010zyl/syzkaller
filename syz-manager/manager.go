@@ -84,6 +84,8 @@ type Manager struct {
 	corpus          *corpus.Corpus
 	corpusDB        *db.DB
 	corpusDBMu      sync.Mutex // for concurrent operations on corpusDB
+	corpusDBAll		  *db.DB
+	corpusDBAllMu    sync.Mutex // for concurrent operations on corpusDBAll
 	corpusPreload   chan []fuzzer.Candidate
 	firstConnect    atomic.Int64 // unix time, or 0 if not connected
 	crashTypes      map[string]bool
@@ -484,6 +486,7 @@ func (mgr *Manager) preloadCorpus() {
 	info := manager.LoadSeeds(mgr.cfg, false)
 	mgr.fresh = info.Fresh
 	mgr.corpusDB = info.CorpusDB
+	mgr.corpusDBAll = info.CorpusDBAll
 	mgr.corpusPreload <- info.Candidates
 }
 
@@ -518,6 +521,7 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 	}
 	injectExec := make(chan bool, 10)
 	serv.CreateInstance(inst.Index(), injectExec, updInfo)
+	fmt.Print("fuzzerInstance: serv.CreateInstance\n")
 
 	rep, vmInfo, err := mgr.runInstanceInner(ctx, inst, injectExec, vm.EarlyFinishCb(func() {
 		// Depending on the crash type and kernel config, fuzzing may continue
@@ -887,16 +891,33 @@ func (mgr *Manager) corpusInputHandler(updates <-chan corpus.NewItemEvent) {
 			mgr.statCoverFiltered.Add(filtered)
 		}
 		if update.Exists {
+			log.Logf(0, "corpus input exists: %v", update.Sig)
+			mgr.corpusDBAllMu.Lock()
+			mgr.corpusDBAll.Save(update.Sig, update.ProgData, 0)
+			if err := mgr.corpusDBAll.Flush(); err != nil {
+				log.Errorf("failed to save all corpus database : %v", err)
+			}
+			mgr.corpusDBAllMu.Unlock()
 			// We only save new progs into the corpus.db file.
 			continue
 		}
+		log.Logf(0, "corpus input no exists: %v", update.Sig)
 		mgr.corpusDBMu.Lock()
 		mgr.corpusDB.Save(update.Sig, update.ProgData, 0)
 		if err := mgr.corpusDB.Flush(); err != nil {
 			log.Errorf("failed to save corpus database: %v", err)
 		}
 		mgr.corpusDBMu.Unlock()
+
+		mgr.corpusDBAllMu.Lock()
+		mgr.corpusDBAll.Save(update.Sig, update.ProgData, 0)
+		if err := mgr.corpusDBAll.Flush(); err != nil {
+			log.Errorf("failed to save all corpus database : %v", err)
+		}
+		mgr.corpusDBAllMu.Unlock()
 	}
+    // print info about corpus progsmap
+    mgr.corpus.Print()
 }
 
 func (mgr *Manager) getMinimizedCorpus() []*corpus.Item {
@@ -991,6 +1012,21 @@ func (mgr *Manager) minimizeCorpusLocked() {
 		log.Fatalf("failed to save corpus database: %v", err)
 	}
 	mgr.corpusDB.BumpVersion(manager.CurrentDBVersion)
+
+	// corpusDBAll
+	mgr.corpusDBAllMu.Lock()
+	defer mgr.corpusDBAllMu.Unlock()
+	for key := range mgr.corpusDBAll.Records {
+		ok1 := mgr.corpus.Item(key) != nil
+		_, ok2 := mgr.disabledHashes[key]
+		if !ok1 && !ok2 {
+			// mgr.corpusDBAll.Delete(key)
+		}
+	}
+	if err := mgr.corpusDBAll.Flush(); err != nil {
+		log.Fatalf("failed to save all corpus database: %v", err)
+	}
+	mgr.corpusDBAll.BumpVersion(manager.CurrentDBVersion)
 }
 
 func setGuiltyFiles(crash *dashapi.Crash, report *report.Report) {
@@ -1038,6 +1074,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature, enabledSyscalls map
 	opts := fuzzer.DefaultExecOpts(mgr.cfg, features, *flagDebug)
 
 	if mgr.mode == ModeFuzzing {
+		fmt.Print("mgr.mode == fuzzing\n")
 		corpusUpdates := make(chan corpus.NewItemEvent, 128)
 		mgr.corpus = corpus.NewFocusedCorpus(context.Background(),
 			corpusUpdates, mgr.coverFilters.Areas)
@@ -1092,6 +1129,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature, enabledSyscalls map
 		}
 		return source
 	} else if mgr.mode == ModeCorpusRun {
+		fmt.Print("mgr.mode == corpus run\n")
 		ctx := &corpusRunner{
 			candidates: candidates,
 			rnd:        rand.New(rand.NewSource(time.Now().UnixNano())),

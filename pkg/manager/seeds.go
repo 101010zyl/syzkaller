@@ -23,6 +23,7 @@ import (
 
 type Seeds struct {
 	CorpusDB   *db.DB
+	CorpusDBAll *db.DB
 	Fresh      bool
 	Candidates []fuzzer.Candidate
 }
@@ -30,7 +31,15 @@ type Seeds struct {
 func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
 	var info Seeds
 	var err error
+	var err2 error
 	info.CorpusDB, err = db.Open(filepath.Join(cfg.Workdir, "corpus.db"), !immutable)
+	info.CorpusDBAll, err2 = db.Open(filepath.Join(cfg.Workdir, "corpusAll.db"), !immutable)
+	if err2 != nil {
+		if info.CorpusDBAll == nil {
+			log.Fatalf("failed to open corpusAll database: %v", err2)
+		}
+		log.Errorf("read %v inputs from corpusAll and got error: %v", len(info.CorpusDBAll.Records), err2)
+	}
 	if err != nil {
 		if info.CorpusDB == nil {
 			log.Fatalf("failed to open corpus database: %v", err)
@@ -53,6 +62,7 @@ func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
 	var wg sync.WaitGroup
 	wg.Add(procs)
 	for p := 0; p < procs; p++ {
+		// fmt.Println("p:", p)
 		go func() {
 			defer wg.Done()
 			for inp := range inputs {
@@ -66,12 +76,15 @@ func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
 		close(outputs)
 	}()
 	go func() {
+		corpusCount := 0
 		for key, rec := range info.CorpusDB.Records {
+			corpusCount++
 			inputs <- &Input{
 				Key:  key,
 				Data: rec.Val,
 			}
 		}
+		log.Logf(0, "loaded %v programs from the corpus", corpusCount)
 		seedPath := filepath.Join("sys", cfg.TargetOS, "test")
 		seedDir := filepath.Join(cfg.Syzkaller, seedPath)
 		if osutil.IsExist(seedDir) {
@@ -79,23 +92,27 @@ func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
 			if err != nil {
 				log.Fatalf("failed to read seeds dir: %v", err)
 			}
+			seedCount := 0
 			for _, seed := range seeds {
 				data, err := os.ReadFile(filepath.Join(seedDir, seed.Name()))
 				if err != nil {
 					log.Fatalf("failed to read seed %v: %v", seed.Name(), err)
 				}
+				seedCount++
 				inputs <- &Input{
 					IsSeed: true,
 					Path:   filepath.Join(seedPath, seed.Name()),
 					Data:   data,
 				}
 			}
+			log.Logf(0, "loaded %v seeds", seedCount)
 		}
 		close(inputs)
 	}()
 	brokenSeeds := 0
 	var brokenCorpus []string
 	var candidates []fuzzer.Candidate
+	outputCount := 0
 	for inp := range outputs {
 		if inp.Prog == nil {
 			if inp.IsSeed {
@@ -115,11 +132,13 @@ func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
 			// b/c they are tried on every start anyway.
 			flags = fuzzer.ProgMinimized
 		}
+		outputCount++
 		candidates = append(candidates, fuzzer.Candidate{
 			Prog:  inp.Prog,
 			Flags: flags,
 		})
 	}
+	log.Logf(0, "loaded %v programs (%v from corpus, %v seeds)", outputCount, len(info.CorpusDB.Records), outputCount-len(info.CorpusDB.Records))
 	if len(brokenCorpus)+brokenSeeds != 0 {
 		log.Logf(0, "broken programs in the corpus: %v, broken seeds: %v", len(brokenCorpus), brokenSeeds)
 	}
@@ -135,6 +154,7 @@ func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
 	// Switch database to the mode when it does not keep records in memory.
 	// We don't need them anymore and they consume lots of memory.
 	info.CorpusDB.DiscardData()
+	info.CorpusDBAll.DiscardData()
 	info.Candidates = candidates
 	return info
 }

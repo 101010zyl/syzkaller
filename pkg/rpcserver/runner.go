@@ -179,6 +179,7 @@ func (runner *Runner) ConnectionLoop() error {
 			if req == nil {
 				break
 			}
+			fmt.Printf("Print: ConnectionLoop sendRequest\n")
 			if err := runner.sendRequest(req); err != nil {
 				return err
 			}
@@ -294,6 +295,7 @@ func (runner *Runner) sendRequest(req *queue.Request) error {
 	var data []byte
 	if req.BinaryFile == "" {
 		progData, err := req.Prog.SerializeForExec()
+		// fmt.Print("Print: sendRequest SerializeForExec\n")
 		if err != nil {
 			// It's bad if we systematically fail to serialize programs,
 			// but so far we don't have a better handling than counting this.

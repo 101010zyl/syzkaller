@@ -259,6 +259,7 @@ type orderImpl struct {
 }
 
 func Order(sources ...Source) Source {
+	fmt.Println("Queue: Order")
 	return &orderImpl{sources: sources}
 }
 

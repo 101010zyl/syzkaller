@@ -221,7 +221,19 @@ func (corpus *Corpus) Items() []*Item {
 	for _, item := range corpus.progsMap {
 		ret = append(ret, item)
 	}
+	for sig, item := range corpus.progsMap {
+		fmt.Printf("Sig: %s, Item: %+v\n", sig, item)
+	}
 	return ret
+}
+// print info about the corpus
+func (corpus *Corpus) Print() {
+	corpus.mu.RLock()
+	defer corpus.mu.RUnlock()
+	fmt.Printf("Corpus: %v\n", corpus.progsMap)
+	for sig, item := range corpus.progsMap {
+		fmt.Printf("Sig: %s, Item: %+v\n", sig, item)
+	}
 }
 
 func (corpus *Corpus) Item(sig string) *Item {

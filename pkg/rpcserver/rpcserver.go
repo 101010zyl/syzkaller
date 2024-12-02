@@ -251,6 +251,7 @@ func (serv *server) handleConn(conn *flatrpc.Conn) {
 		return
 	}
 
+	fmt.Print("Print: handleConn\n")
 	err = serv.handleRunnerConn(runner, conn)
 	log.Logf(2, "runner %v: %v", id, err)
 	runner.resultCh <- err
@@ -461,6 +462,7 @@ func (serv *server) CreateInstance(id int, injectExec chan<- bool, updInfo dispa
 		updInfo:  updInfo,
 		resultCh: make(chan error, 1),
 	}
+	fmt.Print("CreateInstance: Create runner\n")
 	serv.mu.Lock()
 	defer serv.mu.Unlock()
 	if serv.runners[id] != nil {

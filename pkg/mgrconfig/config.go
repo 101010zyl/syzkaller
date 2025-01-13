@@ -191,6 +191,22 @@ type Config struct {
 	// If set, for each reproducer syzkaller will run it once more under strace and save
 	// the output.
 	StraceBin string `json:"strace_bin"`
+	// If true, syzkaller will expect strace_bin to be part of the target
+	// image instead of copying it from the host (default: false).
+	StraceBinOnTarget bool `json:"strace_bin_on_target"`
+
+	// File in PATH to syz-execprog/executor on the target. If set,
+	// syzkaller will expect the execprog/executor binaries to be part of
+	// the target image instead of copying them from the host.
+	ExecprogBinOnTarget string `json:"execprog_bin_on_target"`
+	ExecutorBinOnTarget string `json:"executor_bin_on_target"`
+
+	// Whether to run fsck commands on file system images found in new crash
+	// reproducers. The fsck logs get reported as assets in the dashboard.
+	// Note: you may need to install 3rd-party dependencies for this to work.
+	// fsck commands that can be run by syz-manager are specified in mount
+	// syscall descriptions - typically in sys/linux/filesystem.txt.
+	RunFsck bool `json:"run_fsck"`
 
 	// Type of virtual machine to use, e.g. "qemu", "gce", "android", "isolated", etc.
 	Type string `json:"type"`

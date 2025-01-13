@@ -4,14 +4,17 @@
 package covermerger
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
-	"sync"
 
+	"github.com/google/syzkaller/pkg/coveragedb"
 	"github.com/google/syzkaller/pkg/log"
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/errgroup"
@@ -24,6 +27,7 @@ const (
 	KeyFilePath     = "file_path"
 	KeyStartLine    = "sl"
 	KeyHitCount     = "hit_count"
+	KeyManager      = "manager"
 )
 
 type FileRecord struct {
@@ -31,6 +35,7 @@ type FileRecord struct {
 	RepoCommit
 	StartLine int
 	HitCount  int
+	Manager   string
 }
 
 type RepoCommit struct {
@@ -49,6 +54,94 @@ type FileCoverageMerger interface {
 	Result() *MergeResult
 }
 
+// MergeCSVWriteJSONL mergers input CSV and generates JSONL records.
+// The amount of lines generated is [count(managers)+1] * [count(kernel_files)].
+// Returns (totalInstrumentedLines, totalCoveredLines, error).
+func MergeCSVWriteJSONL(config *Config, descr *coveragedb.HistoryRecord, csvReader io.Reader, w io.Writer,
+) (int, int, error) {
+	eg, c := errgroup.WithContext(context.Background())
+	mergeResults := make(chan *FileMergeResult)
+	eg.Go(func() error {
+		defer close(mergeResults)
+		if err := MergeCSVData(c, config, csvReader, mergeResults); err != nil {
+			return fmt.Errorf("covermerger.MergeCSVData: %w", err)
+		}
+		return nil
+	})
+	var totalInstrumentedLines, totalCoveredLines int
+	eg.Go(func() error {
+		var encoder *json.Encoder
+		if w != nil {
+			gzw := gzip.NewWriter(w)
+			defer gzw.Close()
+			encoder = json.NewEncoder(gzw)
+		}
+		if encoder != nil {
+			if err := encoder.Encode(descr); err != nil {
+				return fmt.Errorf("encoder.Encode(MergedCoverageDescription): %w", err)
+			}
+		}
+		for fileMergeResult := range mergeResults {
+			dashCoverageRecords := mergedCoverageRecords(fileMergeResult)
+			if encoder != nil {
+				for _, record := range dashCoverageRecords {
+					if err := encoder.Encode(record); err != nil {
+						return fmt.Errorf("encoder.Encode(MergedCoverageRecord): %w", err)
+					}
+				}
+			}
+			for _, hitCount := range fileMergeResult.HitCounts {
+				totalInstrumentedLines++
+				if hitCount > 0 {
+					totalCoveredLines++
+				}
+			}
+		}
+		return nil
+	})
+	if err := eg.Wait(); err != nil {
+		return 0, 0, fmt.Errorf("eg.Wait: %w", err)
+	}
+	return totalInstrumentedLines, totalCoveredLines, nil
+}
+
+const allManagers = "*"
+
+func mergedCoverageRecords(fmr *FileMergeResult) []*coveragedb.MergedCoverageRecord {
+	if !fmr.FileExists {
+		return nil
+	}
+	lines := maps.Keys(fmr.HitCounts)
+	slices.Sort(lines)
+	mgrStat := make(map[string]*coveragedb.Coverage)
+	mgrStat[allManagers] = &coveragedb.Coverage{}
+
+	for _, line := range lines {
+		mgrStat[allManagers].AddLineHitCount(line, fmr.HitCounts[line])
+		managerHitCounts := map[string]int{}
+		for _, lineDetail := range fmr.LineDetails[line] {
+			manager := lineDetail.Manager
+			managerHitCounts[manager] += lineDetail.HitCount
+		}
+		for manager, managerHitCount := range managerHitCounts {
+			if _, ok := mgrStat[manager]; !ok {
+				mgrStat[manager] = &coveragedb.Coverage{}
+			}
+			mgrStat[manager].AddLineHitCount(line, managerHitCount)
+		}
+	}
+
+	res := []*coveragedb.MergedCoverageRecord{}
+	for managerName, managerCoverage := range mgrStat {
+		res = append(res, &coveragedb.MergedCoverageRecord{
+			Manager:  managerName,
+			FilePath: fmr.FilePath,
+			FileData: managerCoverage,
+		})
+	}
+	return res
+}
+
 func batchFileData(c *Config, targetFilePath string, records []*FileRecord) (*MergeResult, error) {
 	log.Logf(1, "processing %d records for %s", len(records), targetFilePath)
 	repoCommitsMap := make(map[RepoCommit]bool)
@@ -61,7 +154,7 @@ func batchFileData(c *Config, targetFilePath string, records []*FileRecord) (*Me
 	if err != nil {
 		return nil, fmt.Errorf("failed to getFileVersions: %w", err)
 	}
-	merger := makeFileLineCoverMerger(fvs, c.Base, c.StoreDetails)
+	merger := makeFileLineCoverMerger(fvs, c.Base)
 	for _, record := range records {
 		merger.Add(record)
 	}
@@ -87,6 +180,8 @@ func makeRecord(fields, schema []string) (*FileRecord, error) {
 			record.StartLine, err = readIntField(key, val)
 		case KeyHitCount:
 			record.HitCount, err = readIntField(key, val)
+		case KeyManager:
+			record.Manager = val
 		}
 		if err != nil {
 			return nil, err
@@ -109,7 +204,6 @@ type Config struct {
 	skipRepoClone    bool
 	Base             RepoCommit
 	FileVersProvider FileVersProvider
-	StoreDetails     bool
 }
 
 func isSchema(fields, schema []string) bool {
@@ -124,18 +218,24 @@ func isSchema(fields, schema []string) bool {
 	return true
 }
 
-func MergeCSVData(config *Config, reader io.Reader) (map[string]*MergeResult, error) {
+type FileMergeResult struct {
+	FilePath string
+	*MergeResult
+}
+
+func MergeCSVData(c context.Context, config *Config, reader io.Reader, results chan<- *FileMergeResult) error {
 	var schema []string
 	csvReader := csv.NewReader(reader)
 	if fields, err := csvReader.Read(); err != nil {
-		return nil, fmt.Errorf("failed to read schema: %w", err)
+		return fmt.Errorf("failed to read schema: %w", err)
 	} else {
 		schema = fields
 	}
-	errStreamChan := make(chan error, 1)
+	errStreamChan := make(chan error, 2)
 	recordsChan := make(chan *FileRecord)
 	go func() {
 		defer close(recordsChan)
+		defer func() { errStreamChan <- nil }()
 		for {
 			fields, err := csvReader.Read()
 			if err == io.EOF {
@@ -154,17 +254,20 @@ func MergeCSVData(config *Config, reader io.Reader) (map[string]*MergeResult, er
 				errStreamChan <- fmt.Errorf("makeRecord: %w", err)
 				return
 			}
-			recordsChan <- record
+			select {
+			case <-c.Done():
+				return
+			case recordsChan <- record:
+			}
 		}
-		errStreamChan <- nil
 	}()
-	mergeResult, errMerging := mergeChanData(config, recordsChan)
+	errMerging := mergeChanData(c, config, recordsChan, results)
 	errStream := <-errStreamChan
 	if errMerging != nil || errStream != nil {
-		return nil, fmt.Errorf("errors merging stream data:\nmerger err: %w\nstream reader err: %w",
+		return fmt.Errorf("errors merging stream data:\nmerger err: %w\nstream reader err: %w",
 			errMerging, errStream)
 	}
-	return mergeResult, nil
+	return nil
 }
 
 type FileRecords struct {
@@ -172,33 +275,30 @@ type FileRecords struct {
 	records  []*FileRecord
 }
 
-func mergeChanData(c *Config, recordChan <-chan *FileRecord) (map[string]*MergeResult, error) {
-	g, ctx := errgroup.WithContext(context.Background())
-	frecordChan := groupFileRecords(recordChan, ctx)
-	stat := make(map[string]*MergeResult)
-	var mu sync.Mutex
-	for i := 0; i < c.Jobs; i++ {
+func mergeChanData(c context.Context, cfg *Config, recordChan <-chan *FileRecord, results chan<- *FileMergeResult,
+) error {
+	g := errgroup.Group{}
+	frecordChan := groupFileRecords(recordChan, c)
+
+	for i := 0; i < cfg.Jobs; i++ {
 		g.Go(func() error {
 			for frecord := range frecordChan {
-				if mr, err := batchFileData(c, frecord.fileName, frecord.records); err != nil {
+				mr, err := batchFileData(cfg, frecord.fileName, frecord.records)
+				if err != nil {
 					return fmt.Errorf("failed to batchFileData(%s): %w", frecord.fileName, err)
-				} else {
-					mu.Lock()
-					if _, exist := stat[frecord.fileName]; exist {
-						mu.Unlock()
-						return fmt.Errorf("file %s was already processed", frecord.fileName)
-					}
-					stat[frecord.fileName] = mr
-					mu.Unlock()
+				}
+				select {
+				case <-c.Done():
+					return nil
+				case results <- &FileMergeResult{
+					FilePath:    frecord.fileName,
+					MergeResult: mr}:
 				}
 			}
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-	return stat, nil
+	return g.Wait()
 }
 
 func groupFileRecords(recordChan <-chan *FileRecord, ctx context.Context) chan FileRecords {
@@ -218,18 +318,23 @@ func groupFileRecords(recordChan <-chan *FileRecord, ctx context.Context) chan F
 				targetFile = curTargetFile
 			}
 			if curTargetFile != targetFile {
-				frecordChan <- FileRecords{
+				select {
+				case <-ctx.Done():
+					return
+				case frecordChan <- FileRecords{
 					fileName: targetFile,
-					records:  records,
+					records:  records}:
 				}
 				records = nil
 				targetFile = curTargetFile
 			}
 			records = append(records, record)
 		}
-		frecordChan <- FileRecords{
+		select {
+		case <-ctx.Done():
+		case frecordChan <- FileRecords{
 			fileName: targetFile,
-			records:  records,
+			records:  records}:
 		}
 	}()
 	return frecordChan

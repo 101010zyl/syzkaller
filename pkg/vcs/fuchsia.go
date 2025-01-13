@@ -7,19 +7,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/google/syzkaller/pkg/osutil"
 )
 
+// TODO: Check out branches and commits from Fuchsia's global integration repo
+// rather than fuchsia.git.
 type fuchsia struct {
 	dir  string
-	repo *git
+	repo *gitRepo
 }
 
 func newFuchsia(dir string, opts []RepoOpt) *fuchsia {
+	// For now, don't clean up the Fuchsia repo when checking out new commits or branches.
+	// Otherwise, subsequent builds will fail due to missing GN args and other build configuration.
+	// TODO: Implement selective cleanup with `fx clean`.
+	opts = append(opts, OptPrecious)
 	return &fuchsia{
 		dir:  dir,
-		repo: newGit(dir, nil, opts),
+		repo: newGitRepo(dir, nil, opts),
 	}
 }
 
@@ -53,26 +60,30 @@ func (ctx *fuchsia) initRepo() error {
 	}
 	cmd := "curl -s 'https://fuchsia.googlesource.com/fuchsia/+/main/scripts/bootstrap?format=TEXT' |" +
 		"base64 --decode | bash"
-	if _, err := runSandboxed(tmpDir, "bash", "-c", cmd); err != nil {
+	// TODO: Remove the second `jiri update` once the `prebuilt_versions` hook is fixed.
+	// Expect and ignore an error from the bootstrap script's invocation of `jiri update`.
+	_, _ = runSandboxed(tmpDir, "bash", "-c", cmd)
+	// Run `jiri update` a second time; it should succeed.
+	if _, err := runSandboxed(filepath.Join(tmpDir, "fuchsia"), "./.jiri_root/bin/jiri", "update"); err != nil {
 		return err
 	}
 	return osutil.Rename(filepath.Join(tmpDir, "fuchsia"), ctx.dir)
 }
 
 func (ctx *fuchsia) CheckoutBranch(repo, branch string) (*Commit, error) {
-	return nil, fmt.Errorf("not implemented for fuchsia: CheckoutBranch")
+	return ctx.repo.CheckoutBranch(repo, branch)
 }
 
 func (ctx *fuchsia) CheckoutCommit(repo, commit string) (*Commit, error) {
-	return nil, fmt.Errorf("not implemented for fuchsia: CheckoutCommit")
+	return ctx.repo.CheckoutCommit(repo, commit)
 }
 
 func (ctx *fuchsia) SwitchCommit(commit string) (*Commit, error) {
-	return nil, fmt.Errorf("not implemented for fuchsia: SwitchCommit")
+	return ctx.repo.SwitchCommit(commit)
 }
 
-func (ctx *fuchsia) Commit(com string) (*Commit, error) {
-	return nil, fmt.Errorf("not implemented for fuchsia: Commit")
+func (ctx *fuchsia) Commit(commit string) (*Commit, error) {
+	return ctx.repo.Commit(commit)
 }
 
 func (ctx *fuchsia) GetCommitByTitle(title string) (*Commit, error) {
@@ -88,15 +99,15 @@ func (ctx *fuchsia) ExtractFixTagsFromCommits(baseCommit, email string) ([]*Comm
 }
 
 func (ctx *fuchsia) ReleaseTag(commit string) (string, error) {
-	return "", fmt.Errorf("not implemented for fuchsia: ReleaseTag")
+	return ctx.repo.ReleaseTag(commit)
 }
 
 func (ctx *fuchsia) Contains(commit string) (bool, error) {
-	return false, fmt.Errorf("not implemented for fuchsia: Contains")
+	return ctx.repo.Contains(commit)
 }
 
-func (ctx *fuchsia) ListCommitHashes(base string) ([]string, error) {
-	return ctx.repo.ListCommitHashes(base)
+func (ctx *fuchsia) ListCommitHashes(baseCommit string, from time.Time) ([]string, error) {
+	return ctx.repo.ListCommitHashes(baseCommit, from)
 }
 
 func (ctx *fuchsia) Object(name, commit string) ([]byte, error) {
@@ -107,10 +118,11 @@ func (ctx *fuchsia) MergeBases(firstCommit, secondCommit string) ([]*Commit, err
 	return ctx.repo.MergeBases(firstCommit, secondCommit)
 }
 
-func (ctx *fuchsia) CommitExists(string) (bool, error) {
-	return false, fmt.Errorf("not implemented for fuchsia: CommitExists")
+func (ctx *fuchsia) CommitExists(commit string) (bool, error) {
+	return ctx.repo.CommitExists(commit)
 }
 
 func (ctx *fuchsia) PushCommit(repo, commit string) error {
+	// Fuchsia repo doesn't accept unauthenticated pushes.
 	return fmt.Errorf("not implemented for fuchsia: PushCommit")
 }

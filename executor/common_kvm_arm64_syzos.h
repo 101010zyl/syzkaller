@@ -10,6 +10,11 @@
 // Host will map the code in this section into the guest address space.
 #define GUEST_CODE __attribute__((section("guest")))
 
+// Prevent function inlining. This attribute is applied to every guest_handle_* function,
+// making sure they remain small so that the compiler does not attempt to be too clever
+// (e.g. generate switch tables).
+#define noinline __attribute__((noinline))
+
 // Start/end of the guest section.
 extern char *__start_guest, *__stop_guest;
 
@@ -159,7 +164,7 @@ guest_main(uint64 size, uint64 cpu)
 	guest_uexit((uint64)-1);
 }
 
-GUEST_CODE static void guest_execute_code(uint32* insns, uint64 size)
+GUEST_CODE static noinline void guest_execute_code(uint32* insns, uint64 size)
 {
 	volatile void (*fn)() = (volatile void (*)())insns;
 	fn();
@@ -168,7 +173,7 @@ GUEST_CODE static void guest_execute_code(uint32* insns, uint64 size)
 // Perform a userspace exit that can be handled by the host.
 // The host returns from ioctl(KVM_RUN) with kvm_run.exit_reason=KVM_EXIT_MMIO,
 // and can handle the call depending on the data passed as exit code.
-GUEST_CODE static void guest_uexit(uint64 exit_code)
+GUEST_CODE static noinline void guest_uexit(uint64 exit_code)
 {
 	volatile uint64* ptr = (volatile uint64*)ARM64_ADDR_UEXIT;
 	*ptr = exit_code;
@@ -200,8 +205,7 @@ GUEST_CODE static uint32 get_cpu_id()
 
 // Write value to a system register using an MSR instruction.
 // The word "MSR" here has nothing to do with the x86 MSR registers.
-__attribute__((noinline))
-GUEST_CODE static void
+GUEST_CODE static noinline void
 guest_handle_msr(uint64 reg, uint64 val)
 {
 	uint32 msr = reg_to_msr(reg);
@@ -218,7 +222,7 @@ guest_handle_msr(uint64 reg, uint64 val)
 }
 
 // See "SMC Calling Convention", https://documentation-service.arm.com/static/5f8edaeff86e16515cdbe4c6
-GUEST_CODE static void guest_handle_smc(struct api_call_smccc* cmd)
+GUEST_CODE static noinline void guest_handle_smc(struct api_call_smccc* cmd)
 {
 	asm volatile(
 	    "mov x0, %[func_id]\n"
@@ -231,7 +235,7 @@ GUEST_CODE static void guest_handle_smc(struct api_call_smccc* cmd)
 	    // they are ignored as per the calling convention.
 	    "smc #0\n"
 	    : // Ignore the outputs for now
-	    : [func_id] "r"((uint32)cmd->func_id),
+	    : [func_id] "r"((uint64)cmd->func_id),
 	      [arg1] "r"(cmd->params[0]), [arg2] "r"(cmd->params[1]),
 	      [arg3] "r"(cmd->params[2]), [arg4] "r"(cmd->params[3]),
 	      [arg5] "r"(cmd->params[4])
@@ -241,7 +245,7 @@ GUEST_CODE static void guest_handle_smc(struct api_call_smccc* cmd)
 	      "memory");
 }
 
-GUEST_CODE static void guest_handle_hvc(struct api_call_smccc* cmd)
+GUEST_CODE static noinline void guest_handle_hvc(struct api_call_smccc* cmd)
 {
 	asm volatile(
 	    "mov x0, %[func_id]\n"
@@ -253,7 +257,7 @@ GUEST_CODE static void guest_handle_hvc(struct api_call_smccc* cmd)
 	    // TODO(glider): nonzero immediate values are designated for use by hypervisor vendors.
 	    "hvc #0\n"
 	    : // Ignore the outputs for now
-	    : [func_id] "r"((uint32)cmd->func_id),
+	    : [func_id] "r"((uint64)cmd->func_id),
 	      [arg1] "r"(cmd->params[0]), [arg2] "r"(cmd->params[1]),
 	      [arg3] "r"(cmd->params[2]), [arg4] "r"(cmd->params[3]),
 	      [arg5] "r"(cmd->params[4])
@@ -315,21 +319,21 @@ GUEST_CODE static void guest_handle_hvc(struct api_call_smccc* cmd)
 #define ICC_EOIR1_EL1 "S3_0_C12_C12_1"
 #define ICC_DIR_EL1 "S3_0_C12_C11_1"
 
-static GUEST_CODE __always_inline void __raw_writel(uint32 val, uint64 addr)
+GUEST_CODE static __always_inline void __raw_writel(uint32 val, uint64 addr)
 {
 	asm volatile("str %w0, [%1]"
 		     :
 		     : "rZ"(val), "r"(addr));
 }
 
-static GUEST_CODE __always_inline void __raw_writeq(uint64 val, uint64 addr)
+GUEST_CODE static __always_inline void __raw_writeq(uint64 val, uint64 addr)
 {
 	asm volatile("str %x0, [%1]"
 		     :
 		     : "rZ"(val), "r"(addr));
 }
 
-static GUEST_CODE __always_inline uint32 __raw_readl(uint64 addr)
+GUEST_CODE static __always_inline uint32 __raw_readl(uint64 addr)
 {
 	uint32 val;
 	asm volatile("ldr %w0, [%1]"
@@ -338,7 +342,7 @@ static GUEST_CODE __always_inline uint32 __raw_readl(uint64 addr)
 	return val;
 }
 
-static GUEST_CODE __always_inline uint64 __raw_readq(uint64 addr)
+GUEST_CODE static __always_inline uint64 __raw_readq(uint64 addr)
 {
 	uint64 val;
 	asm volatile("ldr %x0, [%1]"
@@ -365,7 +369,7 @@ static GUEST_CODE __always_inline uint64 __raw_readq(uint64 addr)
 	} while (0)
 
 // Helper to implement guest_udelay().
-GUEST_CODE uint64 read_cntvct(void)
+GUEST_CODE static uint64 read_cntvct(void)
 {
 	uint64 val;
 	asm volatile("mrs %0, cntvct_el0"
@@ -451,7 +455,7 @@ GUEST_CODE static void gicv3_dist_init(int nr_spis)
 }
 
 // https://developer.arm.com/documentation/198123/0302/Configuring-the-Arm-GIC
-GUEST_CODE void gicv3_enable_redist(uint32 cpu)
+GUEST_CODE static void gicv3_enable_redist(uint32 cpu)
 {
 	uint64 redist_base_cpu = gicr_base_cpu(cpu);
 	uint32 val = readl(redist_base_cpu + GICR_WAKER);
@@ -462,7 +466,7 @@ GUEST_CODE void gicv3_enable_redist(uint32 cpu)
 	spin_while_readl(ARM64_ADDR_GICR_BASE + GICR_WAKER, GICR_WAKER_ChildrenAsleep);
 }
 
-GUEST_CODE void gicv3_cpu_init(uint32 cpu)
+GUEST_CODE static void gicv3_cpu_init(uint32 cpu)
 {
 	uint64 sgi_base = sgi_base_cpu(cpu);
 
@@ -484,7 +488,7 @@ GUEST_CODE void gicv3_cpu_init(uint32 cpu)
 	gicr_wait_for_rwp(cpu);
 
 	// Enable the GIC system register (ICC_*) access.
-	uint32 icc_sre_el1 = 0;
+	uint64 icc_sre_el1 = 0;
 	asm volatile("mrs %0, " ICC_SRE_EL1
 		     :
 		     : "r"(icc_sre_el1));
@@ -494,7 +498,7 @@ GUEST_CODE void gicv3_cpu_init(uint32 cpu)
 		     : "r"(icc_sre_el1));
 
 	// Set a default priority threshold.
-	uint32 value = ICC_PMR_DEF_PRIO;
+	uint64 value = ICC_PMR_DEF_PRIO;
 	asm volatile("msr " ICC_PMR_EL1 ", %0"
 		     :
 		     : "r"(value));
@@ -522,7 +526,7 @@ GUEST_CODE static void gicv3_irq_enable(uint32 intid)
 		gicr_wait_for_rwp(cpu);
 }
 
-GUEST_CODE static void guest_handle_irq_setup(struct api_call_irq_setup* cmd)
+GUEST_CODE static noinline void guest_handle_irq_setup(struct api_call_irq_setup* cmd)
 {
 	int nr_spis = cmd->nr_spis;
 	if ((nr_spis > VGICV3_MAX_SPI - VGICV3_MIN_SPI) || (nr_spis < 0))
@@ -545,7 +549,7 @@ GUEST_CODE static void guest_handle_irq_setup(struct api_call_irq_setup* cmd)
 	    : "x1");
 }
 
-GUEST_CODE static void guest_handle_memwrite(struct api_call_memwrite* cmd)
+GUEST_CODE static noinline void guest_handle_memwrite(struct api_call_memwrite* cmd)
 {
 	uint64 dest = cmd->base_addr + cmd->offset;
 	switch (cmd->len) {
@@ -576,7 +580,7 @@ GUEST_CODE static void guest_handle_memwrite(struct api_call_memwrite* cmd)
 
 GUEST_CODE static void guest_prepare_its(int nr_cpus, int nr_devices, int nr_events);
 
-GUEST_CODE static void guest_handle_its_setup(struct api_call_3* cmd)
+GUEST_CODE static noinline void guest_handle_its_setup(struct api_call_3* cmd)
 {
 	guest_prepare_its(cmd->args[0], cmd->args[1], cmd->args[2]);
 }
@@ -673,7 +677,7 @@ __attribute__((used))
 GUEST_CODE static void
 guest_irq_handler(struct ex_regs* regs)
 {
-	uint32 iar0, iar1, irq_num = 0;
+	uint64 iar0, iar1, irq_num = 0;
 	bool is_group0 = false;
 	// Acknowledge the interrupt by reading the IAR.
 	// Depending on the particular interrupt's Group (0 or 1), its number will appear in either ICC_IAR0_EL1, or ICC_IAR1_EL1.
@@ -859,7 +863,7 @@ struct its_cmd_block {
 
 // Guest memcpy implementation is using volatile accesses to prevent the compiler from optimizing it
 // into a memcpy() call.
-__attribute__((noinline)) GUEST_CODE static void guest_memcpy(void* dst, void* src, size_t size)
+GUEST_CODE static noinline void guest_memcpy(void* dst, void* src, size_t size)
 {
 	volatile char* pdst = (char*)dst;
 	volatile char* psrc = (char*)src;
@@ -869,7 +873,7 @@ __attribute__((noinline)) GUEST_CODE static void guest_memcpy(void* dst, void* s
 
 // Send an ITS command by copying it to the command queue at the offset defined by GITS_CWRITER.
 // https://developer.arm.com/documentation/100336/0106/operation/interrupt-translation-service--its-/its-commands-and-errors.
-__attribute__((noinline)) GUEST_CODE static void its_send_cmd(uint64 cmdq_base, struct its_cmd_block* cmd)
+GUEST_CODE static noinline void its_send_cmd(uint64 cmdq_base, struct its_cmd_block* cmd)
 {
 	uint64 cwriter = its_read_u64(GITS_CWRITER);
 	struct its_cmd_block* dst = (struct its_cmd_block*)(cmdq_base + cwriter);
@@ -954,8 +958,7 @@ GUEST_CODE static void its_init(uint64 coll_tbl,
 	 (~0ULL >> (63 - (h))))
 
 // Avoid inlining this function, because it may cause emitting constants into .rodata.
-__attribute__((noinline))
-GUEST_CODE static void
+GUEST_CODE static noinline void
 its_mask_encode(uint64* raw_cmd, uint64 val, int h, int l)
 {
 	uint64 mask = GENMASK_ULL(h, l);
@@ -1014,15 +1017,15 @@ GUEST_CODE static void its_encode_collection(struct its_cmd_block* cmd, uint16 c
 	its_mask_encode(&cmd->raw_cmd[2], col, 15, 0);
 }
 
-__attribute__((noinline)) GUEST_CODE void guest_memzero(void* ptr, size_t size)
+GUEST_CODE static noinline void guest_memzero(void* ptr, size_t size)
 {
 	volatile char* p = (char*)ptr;
 	for (size_t i = 0; i < size; i++)
 		p[i] = 0;
 }
 
-GUEST_CODE void its_send_mapd_cmd(uint64 cmdq_base, uint32 device_id, uint64 itt_base,
-				  size_t num_idbits, bool valid)
+GUEST_CODE static void its_send_mapd_cmd(uint64 cmdq_base, uint32 device_id, uint64 itt_base,
+					 size_t num_idbits, bool valid)
 {
 	struct its_cmd_block cmd;
 	guest_memzero(&cmd, sizeof(cmd));
@@ -1035,7 +1038,7 @@ GUEST_CODE void its_send_mapd_cmd(uint64 cmdq_base, uint32 device_id, uint64 itt
 	its_send_cmd(cmdq_base, &cmd);
 }
 
-GUEST_CODE void its_send_mapc_cmd(uint64 cmdq_base, uint32 vcpu_id, uint32 collection_id, bool valid)
+GUEST_CODE static void its_send_mapc_cmd(uint64 cmdq_base, uint32 vcpu_id, uint32 collection_id, bool valid)
 {
 	struct its_cmd_block cmd;
 	guest_memzero(&cmd, sizeof(cmd));
@@ -1084,7 +1087,7 @@ GUEST_CODE static void its_send_devid_eventid_cmd(uint64 cmdq_base, uint8 cmd_nr
 	its_send_cmd(cmdq_base, &cmd);
 }
 
-GUEST_CODE void its_send_movall_cmd(uint64 cmdq_base, uint32 vcpu_id, uint32 vcpu_id2)
+GUEST_CODE static void its_send_movall_cmd(uint64 cmdq_base, uint32 vcpu_id, uint32 vcpu_id2)
 {
 	struct its_cmd_block cmd;
 	guest_memzero(&cmd, sizeof(cmd));
@@ -1118,58 +1121,60 @@ GUEST_CODE static void its_send_sync_cmd(uint64 cmdq_base, uint32 vcpu_id)
 	its_send_cmd(cmdq_base, &cmd);
 }
 
-GUEST_CODE static void guest_handle_its_send_cmd(struct api_call_its_send_cmd* cmd)
+// This function is carefully written in a way that prevents jump table emission.
+// SyzOS cannot reference global constants, and compilers are very eager to generate a jump table
+// for a switch over GITS commands.
+// To work around that, we replace the switch statement with a series of if statements.
+// In addition, cmd->type is stored in a volatile variable, so that it is read on each if statement,
+// preventing the compiler from folding them together.
+GUEST_CODE static noinline void guest_handle_its_send_cmd(struct api_call_its_send_cmd* cmd)
 {
-	switch (cmd->type) {
-	case GITS_CMD_MAPD: {
+	volatile uint8 type = cmd->type;
+	if (type == GITS_CMD_MAPD) {
 		uint64 itt_base = ARM64_ADDR_ITS_ITT_TABLES + cmd->devid * SZ_64K;
-		its_send_mapd_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->devid, itt_base, SYZOS_NUM_IDBITS, cmd->valid);
-		break;
+		its_send_mapd_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->devid, itt_base,
+				  SYZOS_NUM_IDBITS, cmd->valid);
+		return;
 	}
-	case GITS_CMD_MAPC: {
-		its_send_mapc_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->cpuid, cmd->cpuid, cmd->valid);
-		break;
+	if (type == GITS_CMD_MAPC) {
+		its_send_mapc_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->cpuid, cmd->cpuid,
+				  cmd->valid);
+		return;
 	}
-	case GITS_CMD_MAPTI: {
-		its_send_mapti_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->devid, cmd->eventid, cmd->cpuid, cmd->intid);
-		break;
+	if (type == GITS_CMD_MAPTI) {
+		its_send_mapti_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->devid, cmd->eventid,
+				   cmd->cpuid, cmd->intid);
+		return;
 	}
-	case GITS_CMD_MAPI:
-	case GITS_CMD_MOVI: {
-		its_send_devid_eventid_icid_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->type, cmd->devid, cmd->eventid, cmd->intid);
-		break;
+	if (type == GITS_CMD_MAPI || type == GITS_CMD_MOVI) {
+		its_send_devid_eventid_icid_cmd(ARM64_ADDR_ITS_CMDQ_BASE, type,
+						cmd->devid, cmd->eventid, cmd->intid);
+		return;
 	}
-	case GITS_CMD_MOVALL: {
+	if (type == GITS_CMD_MOVALL) {
 		its_send_movall_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->cpuid, cmd->cpuid2);
-		break;
+		return;
 	}
-	case GITS_CMD_INVALL: {
+	if (type == GITS_CMD_INVALL) {
 		its_send_invall_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->cpuid);
-		break;
+		return;
 	}
-	case GITS_CMD_INT:
-	case GITS_CMD_INV:
-	case GITS_CMD_DISCARD:
-	case GITS_CMD_CLEAR: {
-		its_send_devid_eventid_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->type, cmd->devid, cmd->eventid);
-		break;
+	if (type == GITS_CMD_INT || type == GITS_CMD_INV || type == GITS_CMD_DISCARD || type == GITS_CMD_CLEAR) {
+		its_send_devid_eventid_cmd(ARM64_ADDR_ITS_CMDQ_BASE, type, cmd->devid,
+					   cmd->eventid);
+		return;
 	}
-	case GITS_CMD_SYNC: {
-		// This is different from INVALL, as SYNC accepts an RDbase.
+	if (type == GITS_CMD_SYNC) {
 		its_send_sync_cmd(ARM64_ADDR_ITS_CMDQ_BASE, cmd->cpuid);
-		break;
-	}
-	default: {
-		break;
-	}
+		return;
 	}
 }
 
-__attribute__((noinline)) GUEST_CODE static void guest_setup_its_mappings(uint64 cmdq_base,
-									  uint64 itt_tables,
-									  uint32 nr_events,
-									  uint32 nr_devices,
-									  uint32 nr_cpus)
+GUEST_CODE static noinline void guest_setup_its_mappings(uint64 cmdq_base,
+							 uint64 itt_tables,
+							 uint32 nr_events,
+							 uint32 nr_devices,
+							 uint32 nr_cpus)
 {
 	if ((nr_events < 1) || (nr_devices < 1) || (nr_cpus < 1))
 		return;
@@ -1230,7 +1235,7 @@ void gic_rdist_enable_lpis(uint64 cfg_table, size_t cfg_table_size,
 //   452158:       3d800000        str     q0, [x0]
 //   45215c:       d65f03c0        ret
 // , which for some reason hangs.
-__attribute__((noinline)) GUEST_CODE static void configure_lpis(uint64 prop_table, int nr_devices, int nr_events)
+GUEST_CODE static noinline void configure_lpis(uint64 prop_table, int nr_devices, int nr_events)
 {
 	int nr_lpis = nr_devices * nr_events;
 	volatile uint8* tbl = (uint8*)prop_table;

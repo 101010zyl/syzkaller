@@ -7,7 +7,6 @@ package compiler
 
 import (
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -140,7 +139,7 @@ type compiler struct {
 	structTypes    map[string]prog.Type
 	structFiles    map[*ast.Struct]map[string]ast.Pos
 	builtinConsts  map[string]uint64
-	fileMeta       map[string]Meta
+	fileMetas      map[string]Meta
 	recursiveQuery map[ast.Node]bool
 }
 
@@ -159,13 +158,9 @@ func (comp *compiler) warning(pos ast.Pos, msg string, args ...interface{}) {
 }
 
 func (comp *compiler) filterArch() {
-	if comp.fileMeta == nil {
-		comp.fileMeta = comp.fileList()
-	}
 	comp.desc = comp.desc.Filter(func(n ast.Node) bool {
 		pos, typ, name := n.Info()
-		meta := comp.fileMeta[filepath.Base(pos.File)]
-		if meta.SupportsArch(comp.target.Arch) {
+		if comp.fileMeta(pos).SupportsArch(comp.target.Arch) {
 			return true
 		}
 		switch n.(type) {
@@ -210,34 +205,36 @@ func (comp *compiler) structIsVarlen(name string) bool {
 
 func (comp *compiler) parseIntAttrs(descs map[string]*attrDesc, parent ast.Node,
 	attrs []*ast.Type) map[*attrDesc]uint64 {
-	intAttrs, _ := comp.parseAttrs(descs, parent, attrs)
+	intAttrs, _, _ := comp.parseAttrs(descs, parent, attrs)
 	return intAttrs
 }
 
 func (comp *compiler) parseAttrs(descs map[string]*attrDesc, parent ast.Node, attrs []*ast.Type) (
-	map[*attrDesc]uint64, map[*attrDesc]prog.Expression) {
+	map[*attrDesc]uint64, map[*attrDesc]prog.Expression, map[*attrDesc]string) {
 	_, parentType, parentName := parent.Info()
 	resInt := make(map[*attrDesc]uint64)
 	resExpr := make(map[*attrDesc]prog.Expression)
+	resString := make(map[*attrDesc]string)
 	for _, attr := range attrs {
 		if unexpected, _, ok := checkTypeKind(attr, kindIdent); !ok {
 			comp.error(attr.Pos, "unexpected %v, expect attribute", unexpected)
-			return resInt, resExpr
+			return resInt, resExpr, resString
 		}
 		if len(attr.Colon) != 0 {
 			comp.error(attr.Colon[0].Pos, "unexpected ':'")
-			return resInt, resExpr
+			return resInt, resExpr, resString
 		}
 		desc := descs[attr.Ident]
 		if desc == nil {
 			comp.error(attr.Pos, "unknown %v %v attribute %v", parentType, parentName, attr.Ident)
-			return resInt, resExpr
+			return resInt, resExpr, resString
 		}
 		_, dupInt := resInt[desc]
 		_, dupExpr := resExpr[desc]
-		if dupInt || dupExpr {
+		_, dupString := resString[desc]
+		if dupInt || dupExpr || dupString {
 			comp.error(attr.Pos, "duplicate %v %v attribute %v", parentType, parentName, attr.Ident)
-			return resInt, resExpr
+			return resInt, resExpr, resString
 		}
 
 		switch desc.Type {
@@ -245,18 +242,20 @@ func (comp *compiler) parseAttrs(descs map[string]*attrDesc, parent ast.Node, at
 			resInt[desc] = 1
 			if len(attr.Args) != 0 {
 				comp.error(attr.Pos, "%v attribute has args", attr.Ident)
-				return nil, nil
+				return nil, nil, nil
 			}
 		case intAttr:
 			resInt[desc] = comp.parseAttrIntArg(attr)
 		case exprAttr:
 			resExpr[desc] = comp.parseAttrExprArg(attr)
+		case stringAttr:
+			resString[desc] = comp.parseAttrStringArg(attr)
 		default:
 			comp.error(attr.Pos, "attribute %v has unknown type", attr.Ident)
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
-	return resInt, resExpr
+	return resInt, resExpr, resString
 }
 
 func (comp *compiler) parseAttrExprArg(attr *ast.Type) prog.Expression {
@@ -287,6 +286,19 @@ func (comp *compiler) parseAttrIntArg(attr *ast.Type) uint64 {
 		return 0
 	}
 	return sz.Value
+}
+
+func (comp *compiler) parseAttrStringArg(attr *ast.Type) string {
+	if len(attr.Args) != 1 {
+		comp.error(attr.Pos, "%v attribute is expected to have 1 argument", attr.Ident)
+		return ""
+	}
+	arg := attr.Args[0]
+	if !arg.HasString {
+		comp.error(attr.Pos, "%v argument must be a string", attr.Ident)
+		return ""
+	}
+	return arg.String
 }
 
 func (comp *compiler) getTypeDesc(t *ast.Type) *typeDesc {
@@ -458,8 +470,8 @@ func recurFlattenFlags[F ast.Flags[V], V ast.FlagValue](comp *compiler, name str
 			values = append(values, flag)
 		}
 	}
-	if len(values) > 2000 {
-		return fmt.Errorf("%v has more than 2000 values", name)
+	if len(values) > 100000 {
+		return fmt.Errorf("%v has more than 100000 values %v", name, len(values))
 	}
 	flags.SetValues(values)
 	return nil

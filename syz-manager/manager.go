@@ -31,6 +31,7 @@ import (
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/gce"
 	"github.com/google/syzkaller/pkg/ifaceprobe"
+	"github.com/google/syzkaller/pkg/image"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -300,9 +301,6 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		Manager: mgr,
 		Stats:   mgr.servStats,
 		Debug:   *flagDebug,
-	}
-	if mode == ModeIfaceProbe {
-		rpcCfg.CheckGlobs = ifaceprobe.Globs()
 	}
 	mgr.serv, err = rpcserver.New(rpcCfg)
 	if err != nil {
@@ -690,7 +688,10 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 	log.Logf(0, "VM %v: crash: %v%v", crash.InstanceIndex, crash.Title, flags)
 
 	if mgr.mode.FailOnCrashes {
-		mgr.saveJSON("report.json", crash.Report)
+		path := filepath.Join(mgr.cfg.Workdir, "report.json")
+		if err := osutil.WriteJSON(path, crash.Report); err != nil {
+			log.Fatal(err)
+		}
 		log.Fatalf("kernel crashed in smoke testing mode, exiting")
 	}
 
@@ -742,16 +743,6 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 		go mgr.emailCrash(crash)
 	}
 	return mgr.NeedRepro(crash)
-}
-
-func (mgr *Manager) saveJSON(filename string, object any) {
-	data, err := json.MarshalIndent(object, "", "\t")
-	if err != nil {
-		log.Fatalf("failed to serialize json data: %v", err)
-	}
-	if err := osutil.WriteFile(filepath.Join(mgr.cfg.Workdir, filename), data); err != nil {
-		log.Fatal(err)
-	}
 }
 
 func (mgr *Manager) needLocalRepro(crash *manager.Crash) bool {
@@ -921,7 +912,7 @@ func (mgr *Manager) uploadReproAssets(repro *repro.Result) []dashapi.NewAsset {
 	}
 
 	ret := []dashapi.NewAsset{}
-	repro.Prog.ForEachAsset(func(name string, typ prog.AssetType, r io.Reader) {
+	repro.Prog.ForEachAsset(func(name string, typ prog.AssetType, r io.Reader, c *prog.Call) {
 		dashTyp, ok := map[prog.AssetType]dashapi.AssetType{
 			prog.MountInRepro: dashapi.MountInRepro,
 		}[typ]
@@ -932,6 +923,16 @@ func (mgr *Manager) uploadReproAssets(repro *repro.Result) []dashapi.NewAsset {
 		if err != nil {
 			log.Logf(1, "processing of the asset %v (%v) failed: %v", name, typ, err)
 			return
+		}
+		// Report file systems that fail fsck with a separate tag.
+		if mgr.cfg.RunFsck && dashTyp == dashapi.MountInRepro && c.Meta.Attrs.Fsck != "" {
+			logs, isClean, err := image.Fsck(r, c.Meta.Attrs.Fsck)
+			if err != nil {
+				log.Logf(1, "fsck of the asset %v failed: %v", name, err)
+			} else {
+				asset.FsckLog = logs
+				asset.FsIsClean = isClean
+			}
 		}
 		ret = append(ret, asset)
 	})
@@ -1074,8 +1075,7 @@ func (mgr *Manager) BugFrames() (leaks, races []string) {
 	return
 }
 
-func (mgr *Manager) MachineChecked(info *flatrpc.InfoRequest, features flatrpc.Feature,
-	enabledSyscalls map[*prog.Syscall]bool) queue.Source {
+func (mgr *Manager) MachineChecked(features flatrpc.Feature, enabledSyscalls map[*prog.Syscall]bool) queue.Source {
 	if len(enabledSyscalls) == 0 {
 		log.Fatalf("all system calls are disabled")
 	}
@@ -1186,11 +1186,14 @@ func (mgr *Manager) MachineChecked(info *flatrpc.InfoRequest, features flatrpc.F
 	} else if mgr.mode == ModeIfaceProbe {
 		exec := queue.Plain()
 		go func() {
-			res, err := ifaceprobe.Run(vm.ShutdownCtx(), mgr.cfg, exec, info)
+			res, err := ifaceprobe.Run(vm.ShutdownCtx(), mgr.cfg, features, exec)
 			if err != nil {
 				log.Fatalf("interface probing failed: %v", err)
 			}
-			mgr.saveJSON("interfaces.json", res)
+			path := filepath.Join(mgr.cfg.Workdir, "interfaces.json")
+			if err := osutil.WriteJSON(path, res); err != nil {
+				log.Fatal(err)
+			}
 			mgr.exit("interface probe")
 		}()
 		return exec

@@ -1,7 +1,7 @@
 // Copyright 2017 syzkaller project authors. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
-#if GOOS_linux && (GOARCH_amd64 | GOARCH_ppc64 | GOARCH_ppc64le)
+#if GOOS_linux && (GOARCH_amd64 || GOARCH_ppc64 || GOARCH_ppc64le || GOARCH_arm64)
 #include "test_linux.h"
 #endif
 
@@ -208,10 +208,8 @@ static int test_csum_inet_acc()
 
 static int test_cover_filter()
 {
-	char* tmp = tempnam(nullptr, "syz-test-cover-filter");
 	CoverFilter filter;
 	CoverFilter child(filter.FD());
-	free(tmp);
 
 	std::vector<uint64> pcs = {
 	    100,
@@ -321,6 +319,12 @@ static void must_symlink(const char* oldpath, const char* linkpath)
 
 static int test_glob()
 {
+#if GOARCH_arm
+	// When running a 32-bit ARM binary on a 64-bit system under QEMU, readdir() fails
+	// with EOVERFLOW, resulting in Glob() returning 0 files.
+	// Tracking QEMU bug: https://gitlab.com/qemu-project/qemu/-/issues/263.
+	return -1;
+#endif
 	// Note: pkg/runtest.TestExecutor creates a temp dir for the test,
 	// so we create files in cwd and don't clean up.
 	if (!test_one_glob("glob/*", {}))
@@ -368,8 +372,11 @@ static struct {
     {"test_copyin", test_copyin},
     {"test_csum_inet", test_csum_inet},
     {"test_csum_inet_acc", test_csum_inet_acc},
-#if GOOS_linux && (GOARCH_amd64 || GOARCH_ppc64 || GOARCH_ppc64le)
+#if GOOS_linux && (GOARCH_amd64 || GOARCH_ppc64 || GOARCH_ppc64le || GOARCH_arm64)
     {"test_kvm", test_kvm},
+#endif
+#if GOOS_linux && GOARCH_arm64
+    {"test_syzos", test_syzos},
 #endif
     {"test_cover_filter", test_cover_filter},
     {"test_glob", test_glob},

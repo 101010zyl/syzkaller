@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,7 +113,7 @@ func (ctx *Context) Run(waitCtx context.Context) error {
 		if !verbose || ctx.Verbose {
 			ctx.log("%-38v: %v", req.name, result)
 		}
-		if req.Request != nil && req.Request.BinaryFile != "" {
+		if req.Request != nil && req.Type == flatrpc.RequestTypeBinary && req.BinaryFile != "" {
 			os.Remove(req.BinaryFile)
 		}
 	}
@@ -305,13 +306,10 @@ func parseProg(target *prog.Target, dir, filename string, requires map[string]bo
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to read %v: %w", filename, err)
 	}
-	properties := parseRequires(data)
-	// Need to check arch requirement early as some programs
-	// may fail to deserialize on some arches due to missing syscalls.
-	if !checkArch(properties, target.Arch) || !match(properties, requires) {
+	p, properties, err := manager.ParseSeedWithRequirements(target, data, requires)
+	if errors.Is(err, manager.ErrSkippedTest) {
 		return nil, nil, nil, nil
 	}
-	p, err := manager.ParseSeedStrict(target, data)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to deserialize %v: %w", filename, err)
 	}
@@ -366,42 +364,11 @@ func parseProg(target *prog.Target, dir, filename string, requires map[string]bo
 	return p, properties, info, nil
 }
 
-func parseRequires(data []byte) map[string]bool {
-	requires := make(map[string]bool)
-	for s := bufio.NewScanner(bytes.NewReader(data)); s.Scan(); {
-		const prefix = "# requires:"
-		line := s.Text()
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		for _, req := range strings.Fields(line[len(prefix):]) {
-			positive := true
-			if req[0] == '-' {
-				positive = false
-				req = req[1:]
-			}
-			requires[req] = positive
-		}
-	}
-	return requires
-}
-
-func checkArch(requires map[string]bool, arch string) bool {
-	for req, positive := range requires {
-		const prefix = "arch="
-		if strings.HasPrefix(req, prefix) &&
-			arch != req[len(prefix):] == positive {
-			return false
-		}
-	}
-	return true
-}
-
 func (ctx *Context) produceTest(req *runRequest, name string, properties,
 	requires map[string]bool, results *flatrpc.ProgInfo) {
 	req.name = name
 	req.results = results
-	if !match(properties, requires) {
+	if !manager.MatchRequirements(properties, requires) {
 		req.skip = "excluded by constraints"
 	}
 	ctx.createTest(req)
@@ -433,6 +400,7 @@ func (ctx *Context) createTest(req *runRequest) {
 			req.Request.Done(&queue.Result{})
 			return
 		}
+		req.Type = flatrpc.RequestTypeBinary
 		req.BinaryFile = bin
 		ctx.submit(req)
 	}()
@@ -443,27 +411,6 @@ func (ctx *Context) submit(req *runRequest) {
 		return ctx.onDone(req, res)
 	})
 	req.executor.Submit(req.Request)
-}
-
-func match(props, requires map[string]bool) bool {
-	for req, positive := range requires {
-		if positive {
-			if !props[req] {
-				return false
-			}
-			continue
-		}
-		matched := true
-		for _, req1 := range strings.Split(req, ",") {
-			if !props[req1] {
-				matched = false
-			}
-		}
-		if matched {
-			return false
-		}
-	}
-	return true
 }
 
 func (ctx *Context) createSyzTest(p *prog.Prog, sandbox string, threaded, cov bool) (*runRequest, error) {
@@ -547,7 +494,7 @@ func checkResult(req *runRequest) error {
 		return fmt.Errorf("non-successful result status (%v)", req.result.Status)
 	}
 	infos := []*flatrpc.ProgInfo{req.result.Info}
-	isC := req.BinaryFile != ""
+	isC := req.Type == flatrpc.RequestTypeBinary
 	if isC {
 		var err error
 		if infos, err = parseBinOutput(req); err != nil {
@@ -617,10 +564,19 @@ func checkCallResult(req *runRequest, isC bool, run, call int, info *flatrpc.Pro
 		if len(inf.Signal) < 2 && !calls[callName] && len(info.Extra.Signal) == 0 {
 			return fmt.Errorf("run %v: call %v: no signal", run, call)
 		}
-		// syz_btf_id_by_name is a pseudo-syscall that might not provide
-		// any coverage when invoked.
-		if len(inf.Cover) == 0 && callName != "syz_btf_id_by_name" {
-			return fmt.Errorf("run %v: call %v: no cover", run, call)
+		// Pseudo-syscalls that might not provide any coverage when invoked.
+		noCovSyscalls := []string{"syz_btf_id_by_name", "syz_kvm_assert_syzos_uexit"}
+		if len(inf.Cover) == 0 {
+			found := true
+			for _, s := range noCovSyscalls {
+				if callName == s {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("run %v: call %v: no cover", run, call)
+			}
 		}
 		calls[callName] = true
 	} else {

@@ -116,18 +116,27 @@ func (env *testEnv) Test(numVMs int, reproSyz, reproOpts, reproC []byte) ([]inst
 		}
 		return ret, nil
 	}
-	ret = make([]instance.EnvTestResult, numVMs-1)
+	ret = make([]instance.EnvTestResult, numVMs)
 	if env.test.injectSyzFailure {
-		ret = append(ret, instance.EnvTestResult{
-			Error: &instance.TestError{
+		ret[0] = instance.EnvTestResult{
+			Error: &instance.CrashError{
 				Report: &report.Report{
 					Title: "SYZFATAL: test",
 					Type:  crash.SyzFailure,
 				},
 			},
-		})
-	} else {
-		ret = append(ret, instance.EnvTestResult{})
+		}
+	} else if env.test.injectLostConnection {
+		for i := 0; i < numVMs/3; i++ {
+			ret[i] = instance.EnvTestResult{
+				Error: &instance.CrashError{
+					Report: &report.Report{
+						Title: "lost connection to test machine",
+						Type:  crash.LostConnection,
+					},
+				},
+			}
+		}
 	}
 	return ret, nil
 }
@@ -312,11 +321,12 @@ type BisectionTest struct {
 	expectErr     bool
 	expectErrType any
 	// Expect res.Report != nil.
-	expectRep        bool
-	noopChange       bool
-	isRelease        bool
-	flaky            bool
-	injectSyzFailure bool
+	expectRep            bool
+	noopChange           bool
+	isRelease            bool
+	flaky                bool
+	injectSyzFailure     bool
+	injectLostConnection bool
 	// Expected number of returned commits for inconclusive bisection.
 	commitLen int
 	// For cause bisection: Oldest commit returned by bisection.
@@ -495,6 +505,16 @@ var bisectionTests = []BisectionTest{
 		commitLen:        1,
 		fixCommit:        "500",
 		isRelease:        true,
+	},
+	// Tests that bisection returns the correct fix commit despite `lost connection to test machine`.
+	{
+		name:                 "fix-finds-fix-despite-lost-connection",
+		fix:                  true,
+		startCommit:          400,
+		injectLostConnection: true,
+		commitLen:            1,
+		fixCommit:            "500",
+		isRelease:            true,
 	},
 	// Tests that bisection returns the correct fix commit in case of SYZFATAL.
 	{
@@ -957,6 +977,34 @@ func TestMostFrequentReport(t *testing.T) {
 			types:  []crash.Type{crash.UnknownType},
 			report: "A",
 			other:  true,
+		},
+		{
+			name: "do not take lost connection",
+			reports: []*report.Report{
+				{Title: "A", Type: crash.LostConnection},
+				{Title: "B", Type: crash.Warning},
+				{Title: "C", Type: crash.LostConnection},
+				{Title: "D", Type: crash.Warning},
+				{Title: "E", Type: crash.LostConnection},
+				{Title: "F", Type: crash.Warning},
+			},
+			types:  []crash.Type{crash.Warning},
+			report: "B",
+			other:  true,
+		},
+		{
+			name: "only lost connection",
+			reports: []*report.Report{
+				{Title: "A", Type: crash.LostConnection},
+				{Title: "B", Type: crash.LostConnection},
+				{Title: "C", Type: crash.LostConnection},
+				{Title: "D", Type: crash.LostConnection},
+				{Title: "E", Type: crash.LostConnection},
+				{Title: "F", Type: crash.LostConnection},
+			},
+			types:  []crash.Type{crash.LostConnection},
+			report: "A",
+			other:  false,
 		},
 	}
 	for _, test := range tests {

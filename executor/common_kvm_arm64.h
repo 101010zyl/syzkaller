@@ -68,6 +68,33 @@ static void vm_set_user_memory_region(int vmfd, uint32 slot, uint32 flags, uint6
 	ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &memreg);
 }
 
+#define ADRP_OPCODE 0x90000000
+#define ADRP_OPCODE_MASK 0x9f000000
+
+// Code loading SyzOS into guest memory does not handle data relocations (see
+// https://github.com/google/syzkaller/issues/5565), so SyzOS will crash soon after encountering an
+// ADRP instruction. Detect these instructions to catch regressions early.
+// The most common reason for using data relocaions is accessing global variables and constants.
+// Sometimes the compiler may choose to emit a read-only constant to zero-initialize a structure
+// or to generate a jump table for a switch statement.
+static void validate_guest_code(void* mem, size_t size)
+{
+	uint32* insns = (uint32*)mem;
+	for (size_t i = 0; i < size / 4; i++) {
+		if ((insns[i] & ADRP_OPCODE_MASK) == ADRP_OPCODE)
+			fail("ADRP instruction detected in SyzOS, exiting");
+	}
+}
+
+static void install_syzos_code(void* host_mem, size_t mem_size)
+{
+	size_t size = (char*)&__stop_guest - (char*)&__start_guest;
+	if (size > mem_size)
+		fail("SyzOS size exceeds guest memory");
+	memcpy(host_mem, &__start_guest, size);
+	validate_guest_code(host_mem, size);
+}
+
 static void setup_vm(int vmfd, void* host_mem, void** text_slot)
 {
 	// Guest physical memory layout (must be in sync with executor/kvm.h):
@@ -84,7 +111,7 @@ static void setup_vm(int vmfd, void* host_mem, void** text_slot)
 	int slot = 0; // Slot numbers do not matter, they just have to be different.
 
 	struct addr_size host_text = alloc_guest_mem(&allocator, 4 * KVM_PAGE_SIZE);
-	memcpy(host_text.addr, &__start_guest, (char*)&__stop_guest - (char*)&__start_guest);
+	install_syzos_code(host_text.addr, host_text.size);
 	vm_set_user_memory_region(vmfd, slot++, KVM_MEM_READONLY, ARM64_ADDR_EXECUTOR_CODE, host_text.size, (uintptr_t)host_text.addr);
 
 	struct addr_size next = alloc_guest_mem(&allocator, 2 * KVM_PAGE_SIZE);
@@ -240,8 +267,14 @@ static long syz_kvm_add_vcpu(volatile long a0, volatile long a1, volatile long a
 	const struct kvm_opt* const opt_array_ptr = (struct kvm_opt*)a2;
 	uintptr_t opt_count = a3;
 
-	if (vm->next_cpu_id == KVM_MAX_VCPU)
+	if (!vm) {
+		errno = EINVAL;
 		return -1;
+	}
+	if (vm->next_cpu_id == KVM_MAX_VCPU) {
+		errno = ENOMEM;
+		return -1;
+	}
 	int cpu_id = vm->next_cpu_id;
 	int cpufd = ioctl(vm->vmfd, KVM_CREATE_VCPU, cpu_id);
 	if (cpufd == -1)
@@ -326,5 +359,43 @@ static long syz_kvm_vgic_v3_setup(volatile long a0, volatile long a1, volatile l
 	}
 
 	return vgic_fd;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_kvm_assert_syzos_uexit
+static long syz_kvm_assert_syzos_uexit(volatile long a0, volatile long a1)
+{
+	struct kvm_run* run = (struct kvm_run*)a0;
+	uint64 expect = a1;
+
+	if (!run || (run->exit_reason != KVM_EXIT_MMIO) || (run->mmio.phys_addr != ARM64_ADDR_UEXIT)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if ((((uint64*)(run->mmio.data))[0]) != expect) {
+		errno = EDOM;
+		return -1;
+	}
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_kvm_assert_reg
+static long syz_kvm_assert_reg(volatile long a0, volatile long a1, volatile long a2)
+{
+	int vcpu_fd = (int)a0;
+	uint64 id = (uint64)a1;
+	uint64 expect = a2, val = 0;
+
+	struct kvm_one_reg reg = {.id = id, .addr = (uint64)&val};
+	int ret = ioctl(vcpu_fd, KVM_GET_ONE_REG, &reg);
+	if (ret)
+		return ret;
+	if (val != expect) {
+		errno = EDOM;
+		return -1;
+	}
+	return 0;
 }
 #endif

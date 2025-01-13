@@ -17,9 +17,7 @@ import (
 	"reflect"
 	"time"
 
-	"cloud.google.com/go/civil"
 	"github.com/google/syzkaller/pkg/auth"
-	"github.com/google/syzkaller/pkg/coveragedb"
 )
 
 type Dashboard struct {
@@ -497,6 +495,8 @@ type Asset struct {
 	Title       string
 	DownloadURL string
 	Type        AssetType
+	FsckLogURL  string
+	FsIsClean   bool
 }
 
 type AssetType string
@@ -688,22 +688,21 @@ func (dash *Dashboard) SaveDiscussion(req *SaveDiscussionReq) error {
 	return dash.Query("save_discussion", req, nil)
 }
 
-type MergedCoverage struct {
-	Namespace string
-	Repo      string
-	Commit    string
-	Duration  int64
-	DateTo    civil.Date
-	TotalRows int64
-	FileData  map[string]*coveragedb.Coverage
+func (dash *Dashboard) CreateUploadURL() (string, error) {
+	uploadURL := new(string)
+	if err := dash.Query("create_upload_url", nil, uploadURL); err != nil {
+		return "", fmt.Errorf("create_upload_url: %w", err)
+	}
+	return *uploadURL, nil
 }
 
-type SaveCoverageReq struct {
-	Coverage *MergedCoverage
-}
-
-func (dash *Dashboard) SaveCoverage(req *SaveCoverageReq) error {
-	return dash.Query("save_coverage", req, nil)
+// SaveCoverage returns amount of records created in db.
+func (dash *Dashboard) SaveCoverage(gcpURL string) (int, error) {
+	rowsWritten := new(int)
+	if err := dash.Query("save_coverage", gcpURL, rowsWritten); err != nil {
+		return 0, fmt.Errorf("save_coverage: %w", err)
+	}
+	return *rowsWritten, nil
 }
 
 type TestPatchRequest struct {
@@ -802,6 +801,8 @@ func (dash *Dashboard) UploadManagerStats(req *ManagerStatsReq) error {
 type NewAsset struct {
 	DownloadURL string
 	Type        AssetType
+	FsckLog     []byte
+	FsIsClean   bool
 }
 
 type AddBuildAssetsReq struct {
@@ -1023,13 +1024,10 @@ func (dash *Dashboard) queryImpl(method string, req, reply interface{}) error {
 		if err != nil {
 			return err
 		}
-		data, err := json.Marshal(req)
-		if err != nil {
-			return fmt.Errorf("failed to marshal request: %w", err)
-		}
 		gz := gzip.NewWriter(w)
-		if _, err := gz.Write(data); err != nil {
-			return err
+		encoder := json.NewEncoder(gz)
+		if err := encoder.Encode(req); err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
 		}
 		if err := gz.Close(); err != nil {
 			return err

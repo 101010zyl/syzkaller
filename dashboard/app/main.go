@@ -51,6 +51,7 @@ func initHTTPHandlers() {
 	http.Handle("/x/repro.syz", handlerWrapper(handleTextX(textReproSyz)))
 	http.Handle("/x/repro.c", handlerWrapper(handleTextX(textReproC)))
 	http.Handle("/x/repro.log", handlerWrapper(handleTextX(textReproLog)))
+	http.Handle("/x/fsck.log", handlerWrapper(handleTextX(textFsckLog)))
 	http.Handle("/x/patch.diff", handlerWrapper(handleTextX(textPatch)))
 	http.Handle("/x/bisect.txt", handlerWrapper(handleTextX(textLog)))
 	http.Handle("/x/error.txt", handlerWrapper(handleTextX(textError)))
@@ -405,6 +406,8 @@ type uiCrash struct {
 type uiAsset struct {
 	Title       string
 	DownloadURL string
+	FsckLogURL  string
+	FsIsClean   bool
 }
 
 type uiCrashTable struct {
@@ -1577,6 +1580,8 @@ func textFilename(tag string) string {
 		return "minfo.txt"
 	case textReproLog:
 		return "repro.log"
+	case textFsckLog:
+		return "fsck.log"
 	default:
 		panic(fmt.Sprintf("unknown tag %v", tag))
 	}
@@ -2047,12 +2052,14 @@ func linkifyReport(report []byte, repo, commit string) template.HTML {
 
 var sourceFileRe = regexp.MustCompile("( |\t|\n)([a-zA-Z0-9/_.-]+\\.(?:h|c|cc|cpp|s|S|go|rs)):([0-9]+)( |!|\\)|\t|\n)")
 
-func makeUIAssets(build *Build, crash *Crash, forReport bool) []*uiAsset {
+func makeUIAssets(c context.Context, build *Build, crash *Crash, forReport bool) []*uiAsset {
 	var uiAssets []*uiAsset
-	for _, asset := range createAssetList(build, crash, forReport) {
+	for _, asset := range createAssetList(c, build, crash, forReport) {
 		uiAssets = append(uiAssets, &uiAsset{
 			Title:       asset.Title,
 			DownloadURL: asset.DownloadURL,
+			FsckLogURL:  asset.FsckLogURL,
+			FsIsClean:   asset.FsIsClean,
 		})
 	}
 	return uiAssets
@@ -2072,7 +2079,7 @@ func makeUICrash(c context.Context, crash *Crash, build *Build) *uiCrash {
 		ReproLogLink:    textLink(textReproLog, crash.ReproLog),
 		ReproIsRevoked:  crash.ReproIsRevoked,
 		MachineInfoLink: textLink(textMachineInfo, crash.MachineInfo),
-		Assets:          makeUIAssets(build, crash, true),
+		Assets:          makeUIAssets(c, build, crash, true),
 	}
 	if build != nil {
 		ui.uiBuild = makeUIBuild(c, build, true)
@@ -2094,7 +2101,7 @@ func makeUIBuild(c context.Context, build *Build, forReport bool) *uiBuild {
 		KernelCommitTitle:   build.KernelCommitTitle,
 		KernelCommitDate:    build.KernelCommitDate,
 		KernelConfigLink:    textLink(textKernelConfig, build.KernelConfig),
-		Assets:              makeUIAssets(build, nil, forReport),
+		Assets:              makeUIAssets(c, build, nil, forReport),
 	}
 }
 

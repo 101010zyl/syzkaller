@@ -20,7 +20,7 @@ type BackportCommit struct {
 }
 
 // linuxFixBackports() cherry-picks the commits necessary to compile/run older Linux kernel releases.
-func linuxFixBackports(repo *git, extraCommits ...BackportCommit) error {
+func linuxFixBackports(repo *gitRepo, extraCommits ...BackportCommit) error {
 	return applyFixBackports(repo,
 		append(
 			append([]BackportCommit{}, pickLinuxCommits...),
@@ -29,7 +29,7 @@ func linuxFixBackports(repo *git, extraCommits ...BackportCommit) error {
 	)
 }
 
-func applyFixBackports(repo *git, commits []BackportCommit) error {
+func applyFixBackports(repo *gitRepo, commits []BackportCommit) error {
 	for _, info := range commits {
 		if info.GuiltyHash != "" {
 			contains, err := repo.Contains(info.GuiltyHash)
@@ -49,7 +49,7 @@ func applyFixBackports(repo *git, commits []BackportCommit) error {
 			// The fix is already present.
 			continue
 		}
-		_, err = repo.git("cherry-pick", "--no-commit", info.FixHash)
+		_, err = repo.Run("cherry-pick", "--no-commit", info.FixHash)
 		if err != nil {
 			return err
 		}
@@ -88,5 +88,11 @@ var pickLinuxCommits = []BackportCommit{
 		GuiltyHash: `db2b0c5d7b6f19b3c2cab08c531b65342eb5252b`,
 		FixHash:    `82880283d7fcd0a1d20964a56d6d1a5cc0df0713`,
 		FixTitle:   `objtool: Fix truncated string warning`,
+	},
+	{
+		// Fixes `boot failed: WARNING in kvm_wait`.
+		GuiltyHash: `997acaf6b4b59c6a9c259740312a69ea549cc684`,
+		FixHash:    `f4e61f0c9add3b00bd5f2df3c814d688849b8707`,
+		FixTitle:   `x86/kvm: Fix broken irq restoration in kvm_wait`,
 	},
 }

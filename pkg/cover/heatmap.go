@@ -14,6 +14,7 @@ import (
 
 	"cloud.google.com/go/spanner"
 	"github.com/google/syzkaller/pkg/coveragedb"
+	"github.com/google/syzkaller/pkg/coveragedb/spannerclient"
 	_ "github.com/google/syzkaller/pkg/subsystem/lists"
 	"golang.org/x/exp/maps"
 	"google.golang.org/api/iterator"
@@ -36,8 +37,10 @@ type templateHeatmapRow struct {
 }
 
 type templateHeatmap struct {
-	Root    *templateHeatmapRow
-	Periods []string
+	Root       *templateHeatmapRow
+	Periods    []string
+	Subsystems []string
+	Managers   []string
 }
 
 func (thm *templateHeatmapRow) addParts(depth int, pathLeft []string, filePath string, instrumented, covered int64,
@@ -154,7 +157,10 @@ func filesCoverageToTemplateData(fCov []*fileCoverageWithDetails) *templateHeatm
 	return &res
 }
 
-func filesCoverageWithDetailsStmt(ns, subsystem string, timePeriod coveragedb.TimePeriod) spanner.Statement {
+func filesCoverageWithDetailsStmt(ns, subsystem, manager string, timePeriod coveragedb.TimePeriod) spanner.Statement {
+	if manager == "" {
+		manager = "*"
+	}
 	stmt := spanner.Statement{
 		SQL: `
 select
@@ -169,31 +175,32 @@ from merge_history
   join file_subsystems
     on merge_history.namespace = file_subsystems.namespace and files.filepath = file_subsystems.filepath
 where
-  merge_history.namespace=$1 and dateto=$2 and duration=$3`,
+  merge_history.namespace=$1 and dateto=$2 and duration=$3 and manager=$4`,
 		Params: map[string]interface{}{
 			"p1": ns,
 			"p2": timePeriod.DateTo,
 			"p3": timePeriod.Days,
+			"p4": manager,
 		},
 	}
 	if subsystem != "" {
-		stmt.SQL += " and $4=ANY(subsystems)"
-		stmt.Params["p4"] = subsystem
+		stmt.SQL += " and $5=ANY(subsystems)"
+		stmt.Params["p5"] = subsystem
 	}
 	return stmt
 }
 
-func filesCoverageWithDetails(ctx context.Context, projectID, ns, subsystem string, timePeriods []coveragedb.TimePeriod,
+func filesCoverageWithDetails(ctx context.Context, projectID string, scope *SelectScope,
 ) ([]*fileCoverageWithDetails, error) {
-	client, err := coveragedb.NewClient(ctx, projectID)
+	client, err := spannerclient.NewClient(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("spanner.NewClient() failed: %s", err.Error())
 	}
 	defer client.Close()
 
 	res := []*fileCoverageWithDetails{}
-	for _, timePeriod := range timePeriods {
-		stmt := filesCoverageWithDetailsStmt(ns, subsystem, timePeriod)
+	for _, timePeriod := range scope.Periods {
+		stmt := filesCoverageWithDetailsStmt(scope.Ns, scope.Subsystem, scope.Manager, timePeriod)
 		iter := client.Single().Query(ctx, stmt)
 		defer iter.Stop()
 		for {
@@ -238,19 +245,28 @@ func stylesBodyJSTemplate(templData *templateHeatmap,
 		template.HTML(js.Bytes()), nil
 }
 
-func DoHeatMapStyleBodyJS(ctx context.Context, projectID, ns, subsystem string, periods []coveragedb.TimePeriod,
+type SelectScope struct {
+	Ns        string
+	Subsystem string
+	Manager   string
+	Periods   []coveragedb.TimePeriod
+}
+
+func DoHeatMapStyleBodyJS(ctx context.Context, projectID string, scope *SelectScope, sss, managers []string,
 ) (template.CSS, template.HTML, template.HTML, error) {
-	covAndDates, err := filesCoverageWithDetails(ctx, projectID, ns, subsystem, periods)
+	covAndDates, err := filesCoverageWithDetails(ctx, projectID, scope)
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to filesCoverageWithDetails: %w", err)
 	}
 	templData := filesCoverageToTemplateData(covAndDates)
+	templData.Subsystems = sss
+	templData.Managers = managers
 	return stylesBodyJSTemplate(templData)
 }
 
-func DoSubsystemsHeatMapStyleBodyJS(ctx context.Context, projectID, ns, subsystem string,
-	periods []coveragedb.TimePeriod) (template.CSS, template.HTML, template.HTML, error) {
-	covWithDetails, err := filesCoverageWithDetails(ctx, projectID, ns, subsystem, periods)
+func DoSubsystemsHeatMapStyleBodyJS(ctx context.Context, projectID string, scope *SelectScope, sss, managers []string,
+) (template.CSS, template.HTML, template.HTML, error) {
+	covWithDetails, err := filesCoverageWithDetails(ctx, projectID, scope)
 	if err != nil {
 		panic(err)
 	}
@@ -269,6 +285,7 @@ func DoSubsystemsHeatMapStyleBodyJS(ctx context.Context, projectID, ns, subsyste
 		}
 	}
 	templData := filesCoverageToTemplateData(ssCovAndDates)
+	templData.Managers = managers
 	return stylesBodyJSTemplate(templData)
 }
 

@@ -3186,7 +3186,7 @@ error_clear_loop:
 }
 #endif
 
-#if SYZ_EXECUTOR || __NR_syz_kvm_setup_cpu || __NR_syz_kvm_vgic_v3_setup || __NR_syz_kvm_setup_syzos_vm || __NR_syz_kvm_add_vcpu
+#if SYZ_EXECUTOR || __NR_syz_kvm_setup_cpu || __NR_syz_kvm_vgic_v3_setup || __NR_syz_kvm_setup_syzos_vm || __NR_syz_kvm_add_vcpu || __NR_syz_kvm_assert_syzos_uexit || __NR_syz_kvm_assert_reg
 // KVM is not yet supported on RISC-V
 #if !GOARCH_riscv64 && !GOARCH_arm
 #include <errno.h>
@@ -3906,6 +3906,7 @@ static void initialize_cgroups()
 #endif
 
 #if SYZ_EXECUTOR || SYZ_SANDBOX_NONE || SYZ_SANDBOX_NAMESPACE
+static void setup_gadgetfs();
 static void setup_binderfs();
 static void setup_fusectl();
 // Mount tmpfs and chroot into it in sandbox=none and sandbox=namespace.
@@ -3972,8 +3973,24 @@ static void sandbox_common_mount_tmpfs(void)
 		fail("chroot failed");
 	if (chdir("/"))
 		fail("chdir failed");
+	setup_gadgetfs();
 	setup_binderfs();
 	setup_fusectl();
+}
+#endif
+
+#if SYZ_EXECUTOR || SYZ_SANDBOX_NONE || SYZ_SANDBOX_NAMESPACE
+#include <sys/mount.h>
+#include <sys/stat.h>
+
+static void setup_gadgetfs()
+{
+	if (mkdir("/dev/gadgetfs", 0777)) {
+		debug("mkdir(/dev/gadgetfs) failed: %d\n", errno);
+	}
+	if (mount("gadgetfs", "/dev/gadgetfs", "gadgetfs", 0, NULL)) {
+		debug("mount of gadgetfs at /dev/gadgetfs failed: %d\n", errno);
+	}
 }
 #endif
 

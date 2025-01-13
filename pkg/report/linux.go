@@ -1106,6 +1106,7 @@ var linuxStackParams = &stackParams{
 		"__sanitizer",
 		"__asan",
 		"kasan",
+		"hwasan",
 		"__msan",
 		"kmsan",
 		"kcsan_setup_watchpoint",
@@ -1332,6 +1333,8 @@ var linuxStackParams = &stackParams{
 		"rhashtable_lookup",
 		"extract_(user|iter)_to_sg",
 		"drop_nlink",
+		"^get_taint$",
+		"^put_device$",
 	},
 	corruptedLines: []*regexp.Regexp{
 		// Fault injection stacks are frequently intermixed with crash reports.
@@ -1953,6 +1956,7 @@ var linuxOopses = append([]*oops{
 			compile(`WARNING: See https.* for mitigation options.`),
 			compile(`WARNING: kernel not compiled with CPU_SRSO`),
 			compile(`EXT4-[Ff][Ss](?: \(.*\))?:`), // printed in __ext4_msg
+			compile(`(?i)warning: .* uses (deprecated v2 capabilities|wireless extensions)`),
 		},
 		crash.Warning,
 	},
@@ -2075,11 +2079,10 @@ var linuxOopses = append([]*oops{
 			compile("INFO: NMI handler"),
 			compile("INFO: recovery required on readonly filesystem"),
 			compile("(handler|interrupt).*took too long"),
-			compile("_INFO::"),                                       // Android can print this during boot.
 			compile("INFO: sys_.* is not present in /proc/kallsyms"), // pkg/host output in debug mode
 			compile("INFO: no syscalls can create resource"),         // pkg/host output in debug mode
-			compile("CAM_INFO:"),                                     // Android prints this.
 			compile("rmt_storage:INFO:"),                             // Android prints this.
+			compile("_INFO:"),                                        // To filter out "INVALID BTF_INFO:NUM".
 		},
 		crash.UnknownType,
 	},

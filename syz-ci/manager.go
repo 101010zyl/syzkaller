@@ -154,11 +154,14 @@ func createManager(cfg *Config, mgrcfg *ManagerConfig, stop chan struct{},
 		repo:           repo,
 		mgrcfg:         mgrcfg,
 		managercfg:     mgrcfg.managercfg,
-		dash:           dash,
 		storage:        assetStorage,
 		debugStorage:   !cfg.AssetStorage.IsEmpty() && cfg.AssetStorage.Debug,
 		stop:           stop,
 		debug:          debug,
+	}
+	// Leave the dashboard interface value as nil if it does not wrap a valid dashboard pointer.
+	if dash != nil {
+		mgr.dash = dash
 	}
 
 	os.RemoveAll(mgr.currentDir)
@@ -469,13 +472,12 @@ func (mgr *Manager) restartManager() {
 	bin := filepath.FromSlash("syzkaller/current/bin/syz-manager")
 	logFile := filepath.Join(mgr.currentDir, "manager.log")
 	benchFile := filepath.Join(mgr.currentDir, benchFileName)
-	os.Remove(benchFile) // or else syz-manager will complain
 
 	args := []string{"-config", cfgFile, "-vv", "1", "-bench", benchFile}
 	if mgr.debug {
 		args = append(args, "-debug")
 	}
-	mgr.cmd = NewManagerCmd(mgr.name, logFile, mgr.Errorf, bin, args...)
+	mgr.cmd = NewManagerCmd(mgr.name, logFile, benchFile, mgr.Errorf, bin, args...)
 	mgr.lastRestarted = time.Now()
 }
 
